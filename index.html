@@ -126,15 +126,28 @@
             { facingMode: "environment" },
             { 
               fps: 10, 
-              // 修正：使用動態計算掃描框大小，佔滿畫面寬度的 85%
               qrbox: (viewfinderWidth, viewfinderHeight) => {
                   return {
                       width: Math.floor(viewfinderWidth * 0.85),
-                      height: 250 // 加大高度，讓條碼更容易進入範圍
+                      height: 250
                   };
               },
-              // 修正：移除 aspectRatio: 1.0，讓相機以手機原生比例呈現（通常是 4:3 或 16:9）
-              videoConstraints: { facingMode: "environment" } 
+              // 👑 優化 1：指定條碼格式，大幅減輕手機運算負擔
+              // 專心辨識 CODE39 以及常見的商品條碼，不要去猜其他冷門格式
+              formatsToSupport: [
+                  Html5QrcodeSupportedFormats.CODE_39,
+                  Html5QrcodeSupportedFormats.CODE_128,
+                  Html5QrcodeSupportedFormats.EAN_13,
+                  Html5QrcodeSupportedFormats.EAN_8,
+                  Html5QrcodeSupportedFormats.QR_CODE
+              ],
+              // 👑 優化 2：強制要求高畫質與連續對焦
+              videoConstraints: { 
+                  facingMode: "environment",
+                  width: { ideal: 1280 },  // 要求至少 720p 以上的高畫質
+                  height: { ideal: 720 },
+                  advanced: [{ focusMode: "continuous" }] // 嘗試喚醒 iOS 的連續對焦功能
+              } 
             },
             (decodedText) => { 
               const f = document.getElementById('flash-overlay'); 
@@ -166,7 +179,6 @@
             if (gate) gate.style.display = 'flex';
         }
       };
-
       const handleManualInput = (code) => {
           setScannedBarcode(code);
           const found = masterData.find(m => String(m.barcode) === code) || manualBinds[code];
