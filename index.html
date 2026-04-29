@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V7.0</title>
+  <title>CUPICHO PRO V7.1</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -76,6 +76,9 @@
 
     function App() {
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master')) || []);
+      // 👑 新增：保存完整的原始 CSV 矩陣陣列，確保格式不流失
+      const [rawCsvData, setRawCsvData] = useState(() => JSON.parse(localStorage.getItem('cup_raw_csv')) || null);
+      
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
       const [manualBinds, setManualBinds] = useState(() => JSON.parse(localStorage.getItem('cup_binds')) || {});
       const [completedLocations, setCompletedLocations] = useState(() => JSON.parse(localStorage.getItem('cup_completed_locs')) || []);
@@ -126,19 +129,25 @@
         return () => unsubscribeBinds();
       }, []);
 
+      // 👑 修改：從雲端同步主檔時，同時也把「原始表格(rawCsv)」同步下來
       useEffect(() => {
         if (!db) return;
         const unsubscribeMaster = db.collection('inventory_settings').doc('master_data').onSnapshot((doc) => {
             if (doc.exists) {
-                const cloudMaster = doc.data().items || [];
-                setMasterData(cloudMaster);
-                localStorage.setItem('cup_master', JSON.stringify(cloudMaster));
+                const data = doc.data();
+                if (data.items) {
+                    setMasterData(data.items);
+                    localStorage.setItem('cup_master', JSON.stringify(data.items));
+                }
+                if (data.rawCsv) {
+                    setRawCsvData(data.rawCsv);
+                    localStorage.setItem('cup_raw_csv', JSON.stringify(data.rawCsv));
+                }
             }
         });
         return () => unsubscribeMaster();
       }, []);
 
-      useEffect(() => { localStorage.setItem('cup_master', JSON.stringify(masterData)); }, [masterData]);
       useEffect(() => { localStorage.setItem('cup_completed_locs', JSON.stringify(completedLocations)); }, [completedLocations]);
 
       const saveInventory = (newInv) => {
@@ -331,38 +340,81 @@
         }
       };
 
-      // 👑 修正：匯入主檔時，保留所有原本檔案的屬性
+      // 👑 重大修改：採用 header: false 將整份 CSV 視為二維陣列保留
       const handleImportCSV = (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        
+        // 使用 header: false 才能完美保留所有欄位(包含重複的品號名稱)
         Papa.parse(file, {
-            header: true, skipEmptyLines: true,
+            header: false, 
+            skipEmptyLines: true,
             complete: function(res) {
-                const parsed = res.data.map(i => ({
-                    ...i, // 保留 CSV 內的所有欄位 (售價, 供應商, 中分類等)
-                    id: String(i['品號'] || i['商品碼'] || '0'),
-                    name: String(i['品名'] || i['商品名稱規格'] || '未知'),
-                    barcode: String(i['物料'] || i['條碼'] || '').replace(/\s+/g, '').replace(/\.0$/, '')
-                })).filter(i => i.barcode || i.id !== '0');
+                const raw = res.data;
+                if(raw.length < 2) return alert("檔案格式有誤或無資料！");
                 
-                setMasterData(parsed);
-                
-                if (db) {
-                    db.collection('inventory_settings').doc('master_data').set({ items: parsed })
-                      .catch(err => alert("⚠️ 主檔上傳雲端失敗（檔案可能過大），但本機已更新。"));
+                const headers = raw[0];
+                const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
+                // 使用 lastIndexOf 抓取最後一個「品號」，因為您的檔案有兩個品號
+                const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
+                const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
+
+                if(barcodeIdx === -1 && idIdx === -1) {
+                    return alert("⚠️ 找不到「物料/條碼」或「品號」欄位，請確認您上傳的是正確的系統匯出檔！");
+                }
+
+                // 建立供系統搜尋用的 MasterData
+                const parsed = [];
+                for(let i = 1; i < raw.length; i++){
+                    const row = raw[i];
+                    parsed.push({
+                        id: idIdx > -1 ? String(row[idIdx] || '0') : '0',
+                        name: nameIdx > -1 ? String(row[nameIdx] || '未知') : '未知',
+                        barcode: barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : ''
+                    });
                 }
                 
-                alert(`成功匯入 ${parsed.length} 筆最新商品資料，並已同步至雲端！`);
+                const validParsed = parsed.filter(i => i.barcode || i.id !== '0');
+                
+                setMasterData(validParsed);
+                setRawCsvData(raw); // 儲存原始照片
+                localStorage.setItem('cup_raw_csv', JSON.stringify(raw));
+                
+                // 完整同步上傳雲端
+                if (db) {
+                    db.collection('inventory_settings').doc('master_data').set({ items: validParsed, rawCsv: raw })
+                      .catch(err => alert("⚠️ 主檔上傳雲端失敗（網路不穩或檔案過大），但您的本機已更新。"));
+                }
+                
+                alert(`✅ 成功匯入 ${validParsed.length} 筆資料，並已完整記憶原檔格式！`);
                 setShowAdmin(false);
             }
         });
       };
 
-      // 👑 新增：匯出 ERP 完全對應格式
+      // 👑 完美格式匯出邏輯：只填入門市庫存數量
       const handleExportERP = () => {
           if (inventory.length === 0) return alert("目前沒有任何盤點資料可以匯出！");
           
-          // 1. 將庫存以商品進行總數加總
+          if (!rawCsvData || rawCsvData.length === 0) {
+              return alert("⚠️ 系統內尚未記憶您的原檔格式。\n\n請先前往右上角「⚙️ 管理」，重新匯入一次您的原始 CSV 檔案，讓系統記住格式後再進行匯出！");
+          }
+
+          // 1. 深拷貝原始表格照片
+          let exportData = JSON.parse(JSON.stringify(rawCsvData));
+          const headers = exportData[0];
+          
+          // 確認欄位位置
+          let stockIdx = headers.indexOf('門市庫存');
+          if (stockIdx === -1) {
+              headers.push('門市庫存'); // 如果原檔沒有，就幫他加在最後一欄
+              stockIdx = headers.length - 1;
+          }
+          
+          const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
+          const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
+
+          // 2. 將所有散落的盤點紀錄加總
           const qtyMap = {};
           inventory.forEach(item => {
               const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
@@ -370,49 +422,51 @@
               qtyMap[key] += parseInt(item.qty, 10) || 0;
           });
 
-          // 2. 建立 CSV 表頭 (符合門市庫存格式，雙品號欄位)
-          let csv = "\ufeff屬性,供應商,物料,品號,品號,品名,售價,箱入數,中分類,門市庫存\n";
-          
-          // 3. 填入主檔資料與盤點數量
-          masterData.forEach(m => {
-              const key = m.id !== '0' ? m.id : m.barcode;
-              const totalQty = qtyMap[key] || 0;
-              
-              const attr = m['屬性'] || '商品';
-              const vendor = m['供應商'] || '';
-              const material = m['物料'] || m.barcode || '';
-              const idStr = m.id || '';
-              const idInt = parseInt(idStr, 10) || 0; 
-              const name = m.name || '';
-              const price = m['售價'] || '';
-              const boxQty = m['箱入數'] || '';
-              const category = m['中分類'] || '';
-              const stockStr = totalQty > 0 ? totalQty : ''; // 沒盤到就留空
-              
-              csv += `"${attr}","${vendor}","${material}","${idInt}","${idStr}","${name}","${price}","${boxQty}","${category}","${stockStr}"\n`;
-              
-              qtyMap[key] = -1; // 標記已輸出
-          });
+          // 3. 把加總數量填回原始表格
+          for (let i = 1; i < exportData.length; i++) {
+              const row = exportData[i];
+              // 補齊可能缺少的空白欄位
+              while (row.length < headers.length) row.push('');
 
-          // 4. 補上主檔內沒有的額外掃描商品
+              const mBarcode = barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : '';
+              const mId = idIdx > -1 ? String(row[idIdx] || '0') : '0';
+              const key = mId !== '0' ? mId : mBarcode;
+
+              if (qtyMap[key]) {
+                  row[stockIdx] = qtyMap[key]; // 填入數量
+                  qtyMap[key] = -1; // 標記為已處理
+              } else {
+                  row[stockIdx] = ''; // 沒盤到就留空
+              }
+          }
+
+          // 4. (防呆) 把有盤到、但主檔卻沒有的未知商品加在最後面
           inventory.forEach(item => {
               const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
-              if (qtyMap[key] !== -1) {
-                  const totalQty = qtyMap[key] || item.qty;
-                  const material = item.barcode || '';
-                  const idStr = item.id !== 'NEW' ? item.id : '';
-                  csv += `"商品","","${material}","","${idStr}","${item.name}","","","","${totalQty}"\n`;
+              if (qtyMap[key] !== -1) { // 代表沒被填入過
+                  const newRow = new Array(headers.length).fill('');
+                  if (barcodeIdx > -1) newRow[barcodeIdx] = item.barcode;
+                  if (idIdx > -1) newRow[idIdx] = item.id !== 'NEW' ? item.id : '';
+                  
+                  const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
+                  if (nameIdx > -1) newRow[nameIdx] = item.name;
+                  
+                  newRow[stockIdx] = qtyMap[key] || item.qty;
+                  exportData.push(newRow);
                   qtyMap[key] = -1;
               }
           });
 
-          const a = document.createElement("a"); 
-          a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-          a.download = `門市庫存_盤點總表_${new Date().toISOString().slice(0,10)}.csv`; 
+          // 5. 將矩陣轉回 CSV 並下載
+          const csv = Papa.unparse(exportData);
+          const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = `門市庫存_盤點總表_${new Date().toISOString().slice(0,10)}.csv`;
           a.click();
       };
 
-      // 保留原本的明細匯出功能
       const handleExportDetails = () => {
           if (inventory.length === 0) return alert("目前沒有任何盤點資料可以匯出！");
           let csv = "\ufeff場域,貨號,品名,條碼,數量,時間\n";
@@ -565,10 +619,9 @@
                     <span className="text-2xl font-black text-black leading-none">{inventory.reduce((a, b) => a + (parseInt(b.qty)||0), 0)}</span>
                   </div>
                   
-                  {/* 👑 修正：底部新增雙匯出按鈕設計 */}
                   <div className="flex gap-1">
                       <button onClick={handleDeleteCurrentSession} className="bg-red-600 text-white px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">刪除</button>
-                      <button onClick={handleExportDetails} className="bg-slate-800 text-slate-300 px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">明細</button>
+                      <button onClick={handleExportDetails} className="bg-slate-800 text-slate-300 px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">匯出明細</button>
                       <button onClick={handleExportERP} className="bg-black text-yellow-500 px-3 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0 whitespace-nowrap">匯出總表</button>
                   </div>
               </div>
@@ -624,6 +677,9 @@
                     <h4 className="text-emerald-500 font-bold mb-2">📥 匯入新商品主檔</h4>
                     <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
                     <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 CSV 檔案</button>
+                    <p className="text-[10px] text-slate-400 mt-3 leading-snug">
+                        ⚠️ <strong className="text-emerald-500">更新V7.1公告：</strong><br/>請重新上傳一次最新的商品 CSV 檔案，系統將會完整記憶您的檔案格式（包含重複的欄位名稱）。匯出總表時即可直接產出與上傳格式完全一模一樣的最終庫存檔。
+                    </p>
                 </div>
 
                 <button onClick={() => { if(confirm('⚠️ 確定清除所有設定？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置系統核心快取</button>
