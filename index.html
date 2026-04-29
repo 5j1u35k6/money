@@ -77,7 +77,6 @@
     function App() {
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master')) || []);
       const [rawCsvData, setRawCsvData] = useState(() => JSON.parse(localStorage.getItem('cup_raw_csv')) || null);
-      
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
       const [manualBinds, setManualBinds] = useState(() => JSON.parse(localStorage.getItem('cup_binds')) || {});
       const [completedLocations, setCompletedLocations] = useState(() => JSON.parse(localStorage.getItem('cup_completed_locs')) || []);
@@ -138,11 +137,8 @@
                     localStorage.setItem('cup_master', JSON.stringify(data.items));
                 }
                 if (data.rawCsv) {
-                    try {
-                        const parsedRaw = typeof data.rawCsv === 'string' ? JSON.parse(data.rawCsv) : data.rawCsv;
-                        setRawCsvData(parsedRaw);
-                        localStorage.setItem('cup_raw_csv', JSON.stringify(parsedRaw));
-                    } catch(e) { console.error("解析原始CSV失敗", e); }
+                    setRawCsvData(data.rawCsv);
+                    localStorage.setItem('cup_raw_csv', JSON.stringify(data.rawCsv));
                 }
             }
         });
@@ -209,8 +205,7 @@
               setScannedBarcode(code);
               
               const { masterData, manualBinds } = dataRef.current;
-              // 支援長短品號與條碼的掃描比對
-              const found = masterData.find(m => String(m.barcode) === code || String(m.id) === code || String(m.shortId) === code) || manualBinds[code];
+              const found = masterData.find(m => String(m.barcode) === code || String(m.id) === code) || manualBinds[code];
               setCurrentItem(found || null);
               setQty('');
 
@@ -237,7 +232,7 @@
       const handleManualInput = (text) => {
           setScannedBarcode(text);
           
-          const exactMatch = masterData.find(m => String(m.barcode) === text || String(m.id) === text || String(m.shortId) === text) || manualBinds[text];
+          const exactMatch = masterData.find(m => String(m.barcode) === text || String(m.id) === text) || manualBinds[text];
           
           if (exactMatch) {
               setCurrentItem(exactMatch);
@@ -248,8 +243,7 @@
                   const results = masterData.filter(m => 
                       m.name.toLowerCase().includes(text.toLowerCase()) || 
                       String(m.barcode).includes(text) ||
-                      String(m.id).includes(text) ||
-                      String(m.shortId).includes(text)
+                      String(m.id).includes(text)
                   ).slice(0, 15);
                   setNameSearchResults(results);
               } else {
@@ -343,35 +337,32 @@
         }
       };
 
-      // 👑 匯入時，100%保留原始檔案二維陣列
+      // 👑 升級：精準讀取原檔，完整保留矩陣與空行跳過邏輯
       const handleImportCSV = (e) => {
         const file = e.target.files[0];
         if (!file) return;
         
         Papa.parse(file, {
-            header: false, // 關閉標頭解析，完整保留每一行的陣列與順序
-            skipEmptyLines: true,
+            header: false, 
+            skipEmptyLines: 'greedy', // 避免最後有空行導致矩陣錯誤
             complete: function(res) {
                 const raw = res.data;
                 if(raw.length < 2) return alert("檔案格式有誤或無資料！");
                 
                 const headers = raw[0];
                 const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
-                const idIdxLast = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
-                const idIdxFirst = headers.indexOf('品號');
+                const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
                 const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
 
-                if(barcodeIdx === -1 && idIdxLast === -1) {
-                    return alert("⚠️ 找不到「物料」或「品號」欄位，請確認您上傳的是正確的系統匯出檔！");
+                if(barcodeIdx === -1 && idIdx === -1) {
+                    return alert("⚠️ 找不到「物料/條碼」或「品號」欄位，請確認您上傳的是正確的系統匯出檔！");
                 }
 
-                // 建立供搜尋使用的主檔字典
                 const parsed = [];
                 for(let i = 1; i < raw.length; i++){
                     const row = raw[i];
                     parsed.push({
-                        id: idIdxLast > -1 ? String(row[idIdxLast] || '0') : '0',
-                        shortId: idIdxFirst > -1 ? String(row[idIdxFirst] || '0') : '0',
+                        id: idIdx > -1 ? String(row[idIdx] || '0') : '0',
                         name: nameIdx > -1 ? String(row[nameIdx] || '未知') : '未知',
                         barcode: barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : ''
                     });
@@ -380,40 +371,28 @@
                 const validParsed = parsed.filter(i => i.barcode || i.id !== '0');
                 
                 setMasterData(validParsed);
-                setRawCsvData(raw); // 儲存完美底片
+                setRawCsvData(raw); 
                 localStorage.setItem('cup_raw_csv', JSON.stringify(raw));
                 
                 if (db) {
-                    const rawString = JSON.stringify(raw);
-                    db.collection('inventory_settings').doc('master_data').set({ items: validParsed, rawCsv: rawString })
-                      .catch(err => alert("⚠️ 主檔上傳雲端失敗（檔案可能過大），但本機已更新。"));
+                    db.collection('inventory_settings').doc('master_data').set({ items: validParsed, rawCsv: raw })
+                      .catch(err => alert("⚠️ 主檔上傳雲端失敗，但您的本機已更新。"));
                 }
                 
-                alert(`✅ 成功匯入 ${validParsed.length} 筆資料，系統已完美記憶您的原檔格式！`);
+                alert(`✅ 成功匯入 ${validParsed.length} 筆資料，並已完整記憶原檔格式！`);
                 setShowAdmin(false);
             }
         });
       };
 
-      // 👑 像素級完美匯出：純手工字串拼接，保證不被套件竄改格式
+      // 👑 無損格式匯出：只更改數值，生成一個全新的檔案
       const handleExportERP = () => {
           if (inventory.length === 0) return alert("目前沒有任何盤點資料可以匯出！");
+          
           if (!rawCsvData || rawCsvData.length === 0) {
               return alert("⚠️ 系統內尚未記憶您的原檔格式。\n\n請先前往右上角「⚙️ 管理」，重新匯入一次您的原始 CSV 檔案，讓系統記住格式後再進行匯出！");
           }
 
-          // 1. 將庫存加總至 Map 字典中
-          const qtyMap = {};
-          inventory.forEach(item => {
-              const kBarcode = String(item.barcode).trim();
-              const kId = String(item.id).trim();
-              const q = parseInt(item.qty, 10) || 0;
-              
-              if (kBarcode) qtyMap[kBarcode] = (qtyMap[kBarcode] || 0) + q;
-              if (kId && kId !== 'NEW' && kId !== '0') qtyMap[kId] = (qtyMap[kId] || 0) + q;
-          });
-
-          // 2. 複製原始底片
           let exportData = JSON.parse(JSON.stringify(rawCsvData));
           const headers = exportData[0];
           
@@ -424,70 +403,60 @@
           }
           
           const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
-          const idIdxLast = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
-          const idIdxFirst = headers.indexOf('品號');
+          const idIdx = headers.lastIndexOf('品號') > -1 ? headers.lastIndexOf('品號') : headers.indexOf('商品碼');
 
-          const writtenKeys = new Set();
+          // 1. 加總所有已盤點數量
+          const qtyMap = {};
+          inventory.forEach(item => {
+              const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
+              if (!qtyMap[key]) qtyMap[key] = 0;
+              qtyMap[key] += parseInt(item.qty, 10) || 0;
+          });
 
-          // 3. 遍歷原始資料並填入數量
+          // 2. 將數量填回一模一樣的格式表中
           for (let i = 1; i < exportData.length; i++) {
               const row = exportData[i];
-              while (row.length < headers.length) row.push('');
+              while (row.length < headers.length) row.push(''); // 防呆補齊欄位
 
-              const rBarcode = barcodeIdx > -1 ? String(row[barcodeIdx]).trim() : '';
-              const rIdLast = idIdxLast > -1 ? String(row[idIdxLast]).trim() : '';
-              const rIdFirst = idIdxFirst > -1 ? String(row[idIdxFirst]).trim() : '';
+              const mBarcode = barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : '';
+              const mId = idIdx > -1 ? String(row[idIdx] || '0') : '0';
+              const key = mId !== '0' ? mId : mBarcode;
 
-              let totalQty = 0;
-              if (rBarcode && qtyMap[rBarcode]) { totalQty = qtyMap[rBarcode]; writtenKeys.add(rBarcode); }
-              else if (rIdLast && qtyMap[rIdLast]) { totalQty = qtyMap[rIdLast]; writtenKeys.add(rIdLast); }
-              else if (rIdFirst && qtyMap[rIdFirst]) { totalQty = qtyMap[rIdFirst]; writtenKeys.add(rIdFirst); }
-
-              row[stockIdx] = totalQty > 0 ? totalQty : ''; 
+              // 確保大於 0 才填入，且如果主檔有重複行，填完一次就標記 -1 避免重複疊加
+              if (qtyMap[key] !== undefined && qtyMap[key] !== -1 && qtyMap[key] > 0) {
+                  row[stockIdx] = qtyMap[key];
+                  qtyMap[key] = -1; 
+              } else {
+                  row[stockIdx] = ''; // 沒盤到就維持空白
+              }
           }
 
-          // 4. (防呆) 把有盤到、但原始 CSV 內沒有的新商品加在最後面
+          // 3. 把有盤到、但主檔卻沒有的「未知商品/新增商品」補在最後面
           inventory.forEach(item => {
-              const kBarcode = String(item.barcode).trim();
-              const kId = String(item.id).trim();
-              
-              if (!writtenKeys.has(kBarcode) && !writtenKeys.has(kId)) {
+              const key = item.id !== '0' && item.id !== 'NEW' ? item.id : item.barcode;
+              // 如果它大於0，代表它沒有在上面被扣成 -1 (也就是原檔中沒有這個商品)
+              if (qtyMap[key] !== undefined && qtyMap[key] !== -1 && qtyMap[key] > 0) { 
                   const newRow = new Array(headers.length).fill('');
+                  newRow[0] = '商品'; // 預設屬性
                   if (barcodeIdx > -1) newRow[barcodeIdx] = item.barcode;
-                  if (idIdxLast > -1 && item.id !== 'NEW') newRow[idIdxLast] = item.id;
+                  if (idIdx > -1) newRow[idIdx] = item.id !== 'NEW' ? item.id : '';
                   
                   const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
                   if (nameIdx > -1) newRow[nameIdx] = item.name;
                   
-                  const attrIdx = headers.indexOf('屬性');
-                  if(attrIdx > -1) newRow[attrIdx] = '商品';
-
-                  newRow[stockIdx] = item.qty;
+                  newRow[stockIdx] = qtyMap[key];
                   exportData.push(newRow);
-                  
-                  writtenKeys.add(kBarcode);
-                  writtenKeys.add(kId);
+                  qtyMap[key] = -1;
               }
           });
 
-          // 5. 手工拼接 CSV 字串 (保留標準的 \r\n 斷行，Excel 解析最完美)
-          let csvContent = "\ufeff"; // BOM，避免中文亂碼
-          exportData.forEach(row => {
-              const line = row.map(cell => {
-                  let str = String(cell);
-                  // 只有內容有逗號或換行時才加雙引號，完全符合標準規範
-                  if (str.includes(',') || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-                      return `"${str.replace(/"/g, '""')}"`;
-                  }
-                  return str;
-              }).join(',');
-              csvContent += line + "\r\n"; 
-          });
-
-          const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+          // 4. 輸出全新的 CSV 檔案 (格式保證 100% 一致)
+          const csv = Papa.unparse(exportData);
+          const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement("a");
           a.href = url;
+          // 檔名設定為「門市庫存_盤點總表_日期」，這樣就不會覆蓋到您原本的上傳檔
           a.download = `門市庫存_盤點總表_${new Date().toISOString().slice(0,10)}.csv`;
           a.click();
       };
@@ -541,7 +510,7 @@
               <div id="reader" className="w-full h-full"></div>
               <div id="cam-gate" className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-slate-950">
                   <button onClick={startScanner} className="bg-yellow-500 text-black px-12 py-5 rounded-2xl font-black text-xl shadow-[0_0_30px_rgba(234,179,8,0.2)] active:scale-95 transition-all">
-                    📷 啟動掃描
+                    📷 啟提掃描
                   </button>
               </div>
           </section>
@@ -677,13 +646,13 @@
                   <input type="text" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="搜尋主檔名稱、物料或品號..."/>
                   
                   <div className="space-y-2">
-                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || String(m.barcode).includes(searchQuery) || String(m.id).includes(searchQuery) || String(m.shortId).includes(searchQuery)).slice(0, 10).map(item => (
+                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || String(m.barcode).includes(searchQuery) || String(m.id).includes(searchQuery)).slice(0, 10).map(item => (
                       <div key={item.id} onClick={() => bindExisting(item)} className="bg-blue-900/30 p-4 rounded-xl border border-blue-500/20 flex justify-between items-center cursor-pointer hover:bg-blue-900/50">
                           <div className="font-bold text-white text-xs leading-snug">{item.name}</div>
                           <span className="text-[10px] font-bold border border-blue-400 px-3 py-1 rounded-full text-blue-300 ml-2 flex-shrink-0 bg-blue-900/50">綁定</span>
                       </div>
                     ))}
-                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || String(m.barcode).includes(searchQuery) || String(m.id).includes(searchQuery) || String(m.shortId).includes(searchQuery)).length === 0 && (
+                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || String(m.barcode).includes(searchQuery) || String(m.id).includes(searchQuery)).length === 0 && (
                         <div className="text-slate-500 text-xs text-center py-4">查無此商品資訊</div>
                     )}
                   </div>
@@ -703,7 +672,7 @@
                     <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
                     <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 CSV 檔案</button>
                     <p className="text-[10px] text-slate-400 mt-3 leading-snug">
-                        ⚠️ <strong className="text-emerald-500">更新V7.2必做事項：</strong><br/>請重新上傳一次最新的商品 CSV 檔案！系統已改用「原檔拍照」技術，會百分百記憶您上傳的格式（包含重複的品號欄位），並於匯出時完美還原。
+                        ⚠️ <strong className="text-emerald-500">更新V7.2公告：</strong><br/>請重新上傳一次最新的商品 CSV 檔案，系統將會完整記憶您的檔案格式（包含重複的欄位名稱）。匯出總表時即可直接產出與上傳格式完全一模一樣的最終庫存檔。
                     </p>
                 </div>
 
