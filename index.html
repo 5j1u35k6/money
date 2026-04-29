@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>CUPICHO PRO V7.6</title>
+  <title>CUPICHO PRO V7.7</title>
   
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/html5-qrcode"></script>
@@ -77,10 +77,10 @@
     ];
 
     function App() {
-      // masterRows 儲存整份 CSV 的底片 (包含標題、所有屬性)
-      const [masterRows, setMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_master_rows')) || []);
-      // masterData 儲存用於盤點搜尋的乾淨索引
+      // 👑 masterData：專門用來「搜尋與掃描」的資料庫 (對應：盤點資料庫2026.04.29)
       const [masterData, setMasterData] = useState(() => JSON.parse(localStorage.getItem('cup_master_index')) || []);
+      // 👑 masterRows：專門用來「匯出填寫數量」的模板底圖 (對應：門市商品庫_0323)
+      const [masterRows, setMasterRows] = useState(() => JSON.parse(localStorage.getItem('cup_master_rows')) || []);
       
       const [inventory, setInventory] = useState(() => JSON.parse(localStorage.getItem('cup_inv')) || []);
       const [manualBinds, setManualBinds] = useState(() => JSON.parse(localStorage.getItem('cup_binds')) || {});
@@ -141,10 +141,9 @@
                     setMasterData(data.index);
                     localStorage.setItem('cup_master_index', JSON.stringify(data.index));
                 }
-                // 如果雲端有 rows 才更新，避免檔案太大沒上傳成功反而被清空
-                if(data.rows && data.rows.length > 0) {
-                    setMasterRows(data.rows);
-                    localStorage.setItem('cup_master_rows', JSON.stringify(data.rows));
+                if(data.template && data.template.length > 0) {
+                    setMasterRows(data.template);
+                    localStorage.setItem('cup_master_rows', JSON.stringify(data.template));
                 }
             }
         });
@@ -201,8 +200,7 @@
               setScannedBarcode(code);
               
               const { masterData, manualBinds } = dataRef.current;
-              // 支援比對物料、兩個品號
-              const found = masterData.find(m => m.barcode === code || m.id1 === code || m.id2 === code) || manualBinds[code];
+              const found = masterData.find(m => m.barcode === code || m.id === code) || manualBinds[code];
               setCurrentItem(found || null);
               setQty('');
               
@@ -228,7 +226,7 @@
           setScannedBarcode(text);
           const cleanText = text.trim();
           
-          const exactMatch = masterData.find(m => m.barcode === cleanText || m.id1 === cleanText || m.id2 === cleanText) || manualBinds[cleanText];
+          const exactMatch = masterData.find(m => m.barcode === cleanText || m.id === cleanText) || manualBinds[cleanText];
           if (exactMatch) {
               setCurrentItem(exactMatch);
               setNameSearchResults([]); 
@@ -238,8 +236,7 @@
                   const results = masterData.filter(m => 
                       m.name.toLowerCase().includes(cleanText.toLowerCase()) || 
                       m.barcode.includes(cleanText) ||
-                      m.id1.includes(cleanText) ||
-                      m.id2.includes(cleanText)
+                      m.id.includes(cleanText)
                   ).slice(0, 15);
                   setNameSearchResults(results);
               } else {
@@ -254,7 +251,7 @@
         if (!scannedBarcode) return alert("請先掃描或輸入資訊！");
         if (isNaN(parsedQty) || parsedQty <= 0) return alert("請輸入有效的數量！");
         
-        const item = currentItem || { id: "NEW", id1: "NEW", name: "未知商品" };
+        const item = currentItem || { id: "NEW", name: "未知商品" };
         const existingIdx = inventory.findIndex(i => i.barcode === scannedBarcode && i.location === currentLocation);
         let newInv = [...inventory];
 
@@ -264,7 +261,6 @@
             const updatedItem = newInv.splice(existingIdx, 1)[0];
             newInv.unshift(updatedItem);
         } else {
-            // 將找到的 id1 等屬性也存進去，方便匯出比對
             newInv.unshift({ ...item, barcode: scannedBarcode, qty: parsedQty, location: currentLocation, time: new Date().toLocaleTimeString() });
         }
         saveInventory(newInv);
@@ -275,68 +271,83 @@
         setTimeout(() => setFeedback(''), 2500);
       };
 
-      const handleImportCSV = (e) => {
+      // 👑 A. 匯入盤點專用資料庫 (盤點資料庫2026.04.29.csv)
+      const handleImportSearchDB = (e) => {
         const file = e.target.files[0];
         if (!file) return;
         
         Papa.parse(file, {
-            header: false, 
-            skipEmptyLines: true,
+            header: false, skipEmptyLines: true,
             complete: function(res) {
                 const rows = res.data;
                 if(rows.length < 2) return alert("檔案格式有誤或無資料！");
                 
-                // 👑 解決 BOM 隱形字元導致無法辨識標題的問題
+                // 清除可能干擾的隱形 BOM 字元
                 const headers = rows[0].map(h => (typeof h === 'string' ? h.replace(/^\uFEFF/, '').trim() : h));
                 
-                // 偵測欄位位置
-                const barcodeIdx = headers.indexOf('物料') > -1 ? headers.indexOf('物料') : headers.indexOf('條碼');
-                const idIdx1 = headers.indexOf('品號');
-                const idIdx2 = headers.lastIndexOf('品號');
-                const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
+                let idIdx = headers.indexOf('商品碼');
+                if (idIdx === -1) idIdx = headers.indexOf('品號');
+                let barcodeIdx = headers.indexOf('條碼');
+                if (barcodeIdx === -1) barcodeIdx = headers.indexOf('物料');
+                let nameIdx = headers.indexOf('商品名稱規格');
+                if (nameIdx === -1) nameIdx = headers.indexOf('品名');
 
-                if(barcodeIdx === -1 && idIdx1 === -1) {
-                    return alert("⚠️ 找不到「物料」或「品號」欄位，請確認上傳的是正確檔案！\n讀取到的標題為: " + headers.join(", "));
+                if(barcodeIdx === -1 && idIdx === -1) {
+                    return alert("⚠️ 找不到「商品碼」或「條碼」欄位，請確認您上傳的是正確的【盤點用資料庫】！\n偵測到的標題為: " + headers.join(", "));
                 }
 
-                // 建立搜尋用乾淨索引
+                // 建立乾淨的搜尋索引
                 const index = [];
                 for(let i=1; i<rows.length; i++){
                     index.push({
-                        id1: idIdx1 > -1 ? String(rows[i][idIdx1] || '').trim() : '',
-                        id2: idIdx2 > -1 ? String(rows[i][idIdx2] || '').trim() : '',
-                        id: idIdx1 > -1 ? String(rows[i][idIdx1] || '').trim() : '', // 向下相容
+                        id: idIdx > -1 ? String(rows[i][idIdx] || '').trim() : '',
                         name: nameIdx > -1 ? String(rows[i][nameIdx] || '未知').trim() : '未知',
                         barcode: barcodeIdx > -1 ? String(rows[i][barcodeIdx] || '').replace(/\s+/g, '').replace(/\.0$/, '') : ''
                     });
                 }
                 
-                const validParsed = index.filter(i => i.barcode || i.id1 || i.id2);
-                
-                setMasterRows(rows);
+                const validParsed = index.filter(i => i.barcode || i.id);
                 setMasterData(validParsed);
-                
-                // 儲存至本地與雲端
-                localStorage.setItem('cup_master_rows', JSON.stringify(rows));
                 localStorage.setItem('cup_master_index', JSON.stringify(validParsed));
                 
                 if (db) {
-                    db.collection('inventory_settings').doc('master_full').set({ index: validParsed, rows: rows })
-                      .catch(err => console.log("主檔上傳雲端過大，已保存在單機"));
+                    db.collection('inventory_settings').doc('master_full').set({ index: validParsed }, { merge: true });
                 }
-                
-                alert(`✅ 成功讀取 ${validParsed.length} 筆商品主檔，完全記憶格式！`);
-                setShowAdmin(false);
+                alert(`✅ 成功讀取 ${validParsed.length} 筆盤點用商品資料庫！`);
+                e.target.value = ''; // Reset
             }
         });
       };
 
-      // 👑 最終完美匯出：拿底片填數字
+      // 👑 B. 匯入匯出專用模板 (門市商品庫_0323.xlsx - 工作表1.csv)
+      const handleImportTemplate = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        Papa.parse(file, {
+            header: false, skipEmptyLines: true,
+            complete: function(res) {
+                const rows = res.data;
+                if(rows.length < 1) return alert("檔案格式有誤或無資料！");
+                
+                setMasterRows(rows);
+                localStorage.setItem('cup_master_rows', JSON.stringify(rows));
+                
+                if (db) {
+                    db.collection('inventory_settings').doc('master_full').set({ template: rows }, { merge: true });
+                }
+                alert(`✅ 成功載入匯出用模板格式 (共 ${rows.length - 1} 筆商品框架)！`);
+                e.target.value = ''; // Reset
+            }
+        });
+      };
+
+      // 👑 最終完美匯出：拿模板對照填入盤點數據
       const handleExportERP = () => {
-          if (masterRows.length === 0) return alert("系統中無底片格式，請先至管理匯入一次原廠 CSV！");
+          if (masterRows.length === 0) return alert("系統中無匯出模板格式，請先至管理「📥 2. 匯入匯出專用模板」！");
           if (inventory.length === 0) return alert("目前沒有盤點資料！");
 
-          // 複製原始底片
+          // 深拷貝原始模板
           let outputRows = JSON.parse(JSON.stringify(masterRows));
           const headers = outputRows[0].map(h => (typeof h === 'string' ? h.replace(/^\uFEFF/, '').trim() : h));
           
@@ -350,46 +361,49 @@
           const idIdx1 = headers.indexOf('品號');
           const idIdx2 = headers.lastIndexOf('品號');
 
-          // 把這次的盤點清單放進處理佇列
+          // 處理盤點資料佇列
           let remainingInv = [...inventory];
 
-          // 逐行核對底片，把對應數值填入
+          // 逐行核對模板，填入數量
           for(let i=1; i<outputRows.length; i++){
               const row = outputRows[i];
-              // 防呆：確保列的長度夠長
+              // 防呆確保列長度充足
               while (row.length < outputRows[0].length) row.push('');
               
-              const rBarcode = barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '') : '';
-              const rId1 = idIdx1 > -1 ? String(row[idIdx1] || '').trim() : '';
-              const rId2 = idIdx2 > -1 ? String(row[idIdx2] || '').trim() : '';
+              const tBarcode = barcodeIdx > -1 ? String(row[barcodeIdx] || '').replace(/\s+/g, '') : '';
+              const tId1 = idIdx1 > -1 ? String(row[idIdx1] || '').trim() : '';
+              const tId2 = idIdx2 > -1 ? String(row[idIdx2] || '').trim() : '';
 
               let rowTotalQty = 0;
               
-              // 從 remainingInv 抓出符合這個品號/物料的，加總後移除
+              // 從盤點清單中尋找符合此列的商品，並將加總後的資料移除
               remainingInv = remainingInv.filter(invItem => {
-                  const isMatch = 
-                      (rBarcode && invItem.barcode === rBarcode) ||
-                      (rId1 && (invItem.id1 === rId1 || invItem.id === rId1 || invItem.barcode === rId1)) ||
-                      (rId2 && (invItem.id2 === rId2 || invItem.id === rId2 || invItem.barcode === rId2));
+                  const invBarcode = String(invItem.barcode || '').replace(/\s+/g, '');
+                  const invId = String(invItem.id || '').trim();
                   
-                  if (isMatch) {
+                  // 比對條碼或任一品號
+                  const matchBarcode = (tBarcode && invBarcode === tBarcode);
+                  const matchId1 = (tId1 && tId1 !== '0' && (invId === tId1 || invBarcode === tId1));
+                  const matchId2 = (tId2 && tId2 !== '0' && (invId === tId2 || invBarcode === tId2));
+                  
+                  if (matchBarcode || matchId1 || matchId2) {
                       rowTotalQty += parseInt(invItem.qty, 10) || 0;
-                      return false; // 移除，不進入下一個迴圈
+                      return false; // 代表這筆資料已填入模板，從 remainingInv 中移除
                   }
-                  return true; // 保留
+                  return true; // 尚未填入，保留
               });
 
               if (rowTotalQty > 0) {
                   row[stockIdx] = rowTotalQty;
               } else {
-                  row[stockIdx] = ''; // 維持空白
+                  row[stockIdx] = ''; // 沒盤到維持空白
               }
           }
 
-          // 如果還有剩下的 (代表是全新的未知商品，主檔裡面沒有)
+          // 處理剩餘「模板上沒有」的新增未知商品
           const remainingGrouped = {};
           remainingInv.forEach(invItem => {
-              const key = invItem.barcode || invItem.id1 || invItem.name;
+              const key = invItem.barcode || invItem.id || invItem.name;
               if(!remainingGrouped[key]) remainingGrouped[key] = { ...invItem, qty: 0 };
               remainingGrouped[key].qty += parseInt(invItem.qty, 10) || 0;
           });
@@ -398,8 +412,8 @@
               const newRow = new Array(outputRows[0].length).fill('');
               newRow[headers.indexOf('屬性') > -1 ? headers.indexOf('屬性') : 0] = '商品';
               if(barcodeIdx > -1) newRow[barcodeIdx] = item.barcode || '';
-              if(idIdx1 > -1) newRow[idIdx1] = item.id1 !== 'NEW' ? (item.id1 || item.id || '') : '';
-              if(idIdx2 > -1) newRow[idIdx2] = item.id2 !== 'NEW' ? (item.id2 || item.id || '') : '';
+              if(idIdx1 > -1) newRow[idIdx1] = item.id !== 'NEW' ? item.id : '';
+              if(idIdx2 > -1 && idIdx2 !== idIdx1) newRow[idIdx2] = item.id !== 'NEW' ? item.id : '';
               
               const nameIdx = headers.indexOf('品名') > -1 ? headers.indexOf('品名') : headers.indexOf('商品名稱規格');
               if(nameIdx > -1) newRow[nameIdx] = item.name || '';
@@ -408,7 +422,7 @@
               outputRows.push(newRow);
           });
 
-          // 轉出完全一致的 CSV
+          // 轉出並下載 CSV
           const csv = Papa.unparse(outputRows);
           const blob = new Blob(["\ufeff" + csv], { type: 'text/csv;charset=utf-8;' });
           const a = document.createElement("a");
@@ -419,12 +433,12 @@
 
       const handleExportDetails = () => {
           if (inventory.length === 0) return alert("目前沒有盤點資料可以匯出！");
-          let csv = "\ufeff場域,品號,品名,物料/條碼,數量,時間\n";
-          inventory.forEach(i => csv += `"${i.location}","${i.id1||i.id||''}","${i.name}","${i.barcode}",${i.qty},"${i.time}"\n`);
+          let csv = "\ufeff場域,商品碼/品號,商品名稱,條碼/物料,數量,盤點時間\n";
+          inventory.forEach(i => csv += `"${i.location}","${i.id !== 'NEW' ? i.id : ''}","${i.name}","${i.barcode}",${i.qty},"${i.time}"\n`);
           const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
           const a = document.createElement("a");
           a.href = URL.createObjectURL(blob);
-          a.download = `Cupicho_區域明細_${new Date().toISOString().slice(0,10)}.csv`;
+          a.download = `Cupicho_區域盤點明細_${new Date().toISOString().slice(0,10)}.csv`;
           a.click();
       };
 
@@ -480,19 +494,19 @@
                           {currentItem ? currentItem.name : (scannedBarcode ? '⚠️ 尚未鎖定商品' : '等待掃描...')}
                       </div>
                       <div className="text-xs text-yellow-600 font-cinzel tracking-widest uppercase h-4">
-                          {currentItem ? `ID: ${currentItem.id1 || currentItem.id || '無'} | BC: ${currentItem.barcode}` : (scannedBarcode && !nameSearchResults.length ? `IN: ${scannedBarcode}` : '')}
+                          {currentItem ? `ID: ${currentItem.id || '無'} | BC: ${currentItem.barcode}` : (scannedBarcode && !nameSearchResults.length ? `IN: ${scannedBarcode}` : '')}
                       </div>
                   </div>
 
                   <div className="grid grid-cols-4 gap-3 relative">
                       <div className="col-span-3 relative">
-                          <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="w-full bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500 placeholder-slate-600 text-sm" placeholder="搜尋物料、品號或品名" />
+                          <input type="text" value={scannedBarcode} onChange={e => handleManualInput(e.target.value)} className="w-full bg-black border border-slate-700 rounded-2xl p-4 text-white font-mono outline-none focus:border-yellow-500 placeholder-slate-600 text-sm" placeholder="搜尋條碼、商品碼或品名" />
                           {nameSearchResults.length > 0 && (
                               <div className="absolute z-50 w-full bg-slate-800 border border-slate-600 mt-2 rounded-xl shadow-2xl max-h-[250px] overflow-y-auto">
                                   {nameSearchResults.map(item => (
-                                      <div key={item.barcode + item.id1} onClick={() => { setScannedBarcode(item.id1 || item.barcode); setCurrentItem(item); setNameSearchResults([]); }} className="p-3 border-b border-slate-700/50 hover:bg-slate-700 cursor-pointer flex flex-col gap-1">
+                                      <div key={item.barcode + item.id} onClick={() => { setScannedBarcode(item.id || item.barcode); setCurrentItem(item); setNameSearchResults([]); }} className="p-3 border-b border-slate-700/50 hover:bg-slate-700 cursor-pointer flex flex-col gap-1">
                                           <span className="text-white text-xs font-bold leading-snug">{item.name}</span>
-                                          <span className="text-yellow-500 text-[10px] font-cinzel">ID: {item.id1 || item.id} | BC: {item.barcode}</span>
+                                          <span className="text-yellow-500 text-[10px] font-cinzel">ID: {item.id} | BC: {item.barcode}</span>
                                       </div>
                                   ))}
                               </div>
@@ -545,7 +559,7 @@
                   <div className="flex gap-1">
                       <button onClick={() => { if(confirm('⚠️ 刪除本次盤點？')) saveInventory([]); }} className="bg-red-600 text-white px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">刪除</button>
                       <button onClick={handleExportDetails} className="bg-slate-800 text-slate-300 px-2 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0">明細</button>
-                      <button onClick={handleExportERP} className="bg-black text-yellow-500 px-3 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0 whitespace-nowrap">匯出總表</button>
+                      <button onClick={handleExportERP} className="bg-black text-yellow-500 px-4 py-2 rounded-xl text-xs font-black shadow-md flex-shrink-0 whitespace-nowrap">匯出總表</button>
                   </div>
               </div>
           </div>
@@ -557,7 +571,7 @@
                     <h3 className="text-lg font-bold text-white mt-1.5">⚠️ 未知商品</h3>
                 </div>
                 <div className="bg-yellow-500/10 border border-yellow-500/30 p-4 rounded-2xl mb-6 text-center flex-shrink-0">
-                    <p className="text-[10px] text-yellow-500 mb-1">掃描到的物料 / 品號</p>
+                    <p className="text-[10px] text-yellow-500 mb-1">掃描到的條碼 / 商品碼</p>
                     <p className="text-2xl font-cinzel font-bold text-white">{unknownBarcode}</p>
                 </div>
                 <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 mb-4 flex-shrink-0">
@@ -565,16 +579,16 @@
                   <input type="text" value={newProductName} onChange={e=>setNewProductName(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="輸入商品名稱"/>
                   <button onClick={() => {
                     if(!newProductName) return alert("請輸入名稱！");
-                    const newBinds = { ...manualBinds, [unknownBarcode]: { id1: "NEW", name: newProductName } };
-                    saveBindsToCloud(newBinds); setCurrentItem({ id1: "NEW", name: newProductName }); setUnknownBarcode(null);
+                    const newBinds = { ...manualBinds, [unknownBarcode]: { id: "NEW", name: newProductName } };
+                    saveBindsToCloud(newBinds); setCurrentItem({ id: "NEW", name: newProductName }); setUnknownBarcode(null);
                   }} className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold">✅ 確認新增</button>
                 </div>
                 <div className="bg-slate-900 p-5 rounded-3xl border border-slate-800 flex-1 overflow-y-auto">
                   <h4 className="text-blue-400 font-bold mb-3 text-sm">選項 B：尋找現有商品綁定</h4>
-                  <input type="text" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="搜尋名稱、物料或品號..."/>
+                  <input type="text" value={searchQuery} onChange={e=>setSearchQuery(e.target.value)} className="w-full bg-black border border-slate-700 p-4 rounded-2xl text-white outline-none mb-3" placeholder="搜尋名稱、條碼或品號..."/>
                   <div className="space-y-2">
-                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.barcode.includes(searchQuery) || m.id1.includes(searchQuery)).slice(0, 10).map(item => (
-                      <div key={item.barcode + item.id1} onClick={() => {
+                    {searchQuery.length > 0 && masterData.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.barcode.includes(searchQuery) || m.id.includes(searchQuery)).slice(0, 10).map(item => (
+                      <div key={item.barcode + item.id} onClick={() => {
                         const newBinds = { ...manualBinds, [unknownBarcode]: item };
                         saveBindsToCloud(newBinds); setCurrentItem(item); setUnknownBarcode(null);
                       }} className="bg-blue-900/30 p-4 rounded-xl border border-blue-500/20 flex justify-between items-center cursor-pointer">
@@ -593,14 +607,25 @@
                     <h3 className="text-2xl font-bold text-white italic">⚙️ 系統設定</h3>
                     <button onClick={() => setShowAdmin(false)} className="text-slate-500 text-4xl">×</button>
                 </div>
-                <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-6">
-                    <h4 className="text-emerald-500 font-bold mb-2">📥 匯入商品主檔 CSV</h4>
-                    <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-file" onChange={handleImportCSV} />
-                    <button onClick={() => document.getElementById('csv-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇 CSV 檔案</button>
-                    <p className="text-[10px] text-slate-400 mt-3 leading-snug italic">
-                        💡 系統已更新底層解析技術，將 100% 保留您上傳的所有欄位與資料，並以此格式產出總表。
+
+                <div className="bg-emerald-900/20 border border-emerald-500/30 p-6 rounded-[32px] mb-5">
+                    <h4 className="text-emerald-500 font-bold mb-2">📥 1. 匯入盤點用資料庫</h4>
+                    <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-db-file" onChange={handleImportSearchDB} />
+                    <button onClick={() => document.getElementById('csv-db-file').click()} className="bg-emerald-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇盤點資料庫 (供掃描)</button>
+                    <p className="text-[10px] text-emerald-400/70 mt-2 leading-snug">
+                        請上傳您的「盤點資料庫2026.04.29.csv」，系統將以此供店員掃描與搜尋對比。
                     </p>
                 </div>
+
+                <div className="bg-blue-900/20 border border-blue-500/30 p-6 rounded-[32px] mb-6">
+                    <h4 className="text-blue-500 font-bold mb-2">📥 2. 匯入匯出專用模板</h4>
+                    <input type="file" accept=".csv" style={{ display: 'none' }} id="csv-template-file" onChange={handleImportTemplate} />
+                    <button onClick={() => document.getElementById('csv-template-file').click()} className="bg-blue-600 text-white w-full py-4 rounded-2xl font-bold shadow-lg mt-2">📁 選擇匯出模板檔 (對應格式)</button>
+                    <p className="text-[10px] text-blue-400/70 mt-2 leading-snug">
+                        請上傳「門市商品庫_0323...csv」，系統產出總表時，會100%保留此檔案之所有格式與供應商屬性。
+                    </p>
+                </div>
+
                 <button onClick={() => { if(confirm('⚠️ 確定清除所有設定？')){localStorage.clear();location.reload();} }} className="text-slate-600 text-xs font-bold py-4 mt-auto text-center w-full">重置系統核心快取</button>
             </div>
           )}
